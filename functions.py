@@ -132,8 +132,9 @@ def cut_to_sequences(feats_df, seq_length):
     return X_sequences, y_targets
 
 
-def mae_ignore_zeros(y_true, y_pred, false_positives_penalty_factor=0.1):
-    # Description: a version of MAE that only accounts the errors where the target is not zero.
+def batch_mae_ignore_zeros(y_true, y_pred, false_positives_penalty_factor=0.1):
+    # Description: a version of batch MAE that only accounts the errors where the target is not zero.
+    #              Thus if y_true is 0 and y_pred is 0 the nodel is not rewarded and not punished.
     #              A lot of taxa are sparsely populated and this loss allows the model to focus on the relevant errors.
 
     # Example:
