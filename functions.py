@@ -174,7 +174,7 @@ def batch_mae_ignore_zeros(y_true, y_pred, false_positives_penalty_factor=0.1):
     false_positives_avg = tf.reduce_mean(y_pred_zero)
 
     # Combine the MAE on non-zero elements with the average of false positives
-    mae_ignore_zeros = mae_non_zero + (false_positives_avg * false_positives_penalty_factor)
+    mae_ignore_zeros = (mae_non_zero + (false_positives_avg * false_positives_penalty_factor)) * 100
 
     return mae_ignore_zeros
 
@@ -195,7 +195,7 @@ def calculate_percentage_errors(y_pred_df, y_test_df):
     return errors_df
 
 
-def percentile_graph(errors_df, label, y_top_lim=3, step=0.1, x_percentile=None):
+def percentile_graph(errors_df, label, y_top_lim=3, step=0.1):
     # Description: Solves the problem of representing accuracy on a lot of different taxa in one single graph
     # Produces a graph of percentiles on medians in (y_pred - y_true) on taxa sequences
 
@@ -211,12 +211,14 @@ def percentile_graph(errors_df, label, y_top_lim=3, step=0.1, x_percentile=None)
     plt.figure(figsize=(8, 6))
     sns.lineplot(median_error_percentiles)
     plt.title(f"Percentiles of median absolute errors {label}")
+    plt.xlabel("Percentile")
+    plt.ylabel("Median Error")
     plt.xticks(x_ticks_range)
     plt.yticks(np.arange(0, float(y_top_lim + step), step))
     plt.ylim(0, y_top_lim)
 
-    if x_percentile is not None:
-        sns.lineplot([x_percentile for _ in range(len(percentile_range))], color="red")  # the x percentile line
+    percentile_50 = median_error_percentiles[50]
+    sns.lineplot([percentile_50 for _ in range(len(percentile_range))], color="red", label="50 percentile line")
 
     plt.show()
 
