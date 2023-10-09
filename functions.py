@@ -4,6 +4,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import tensorflow as tf
 from joblib import Parallel, delayed
+import os
+import shutil
+from tqdm import tqdm
 
 
 # hardcoded stuff
@@ -63,6 +66,8 @@ def feature_wise_scaling(df):
 
 
 def preprocess(zero_values_percentage_cutoff, smoothing_window_size):
+
+    # Description: reads the data; removes underpopulated taxa; smoothes and scales
 
     # load the data
     df = pd.read_csv(df_path, index_col="Unnamed: 0").T
@@ -132,7 +137,8 @@ def cut_to_sequences(feats_df, seq_length):
     return X_sequences, y_targets
 
 
-def batch_mae_ignore_zeros(y_true, y_pred, false_positives_penalty_factor=0.1):
+class mae_ignore_zeros(tf.keras.losses.Loss):
+
     # Description: a version of batch MAE that only accounts the errors where the target is not zero.
     #              Thus if y_true is 0 and y_pred is 0 the nodel is not rewarded and not punished.
     #              A lot of taxa are sparsely populated and this loss allows the model to focus on the relevant errors.
@@ -149,35 +155,42 @@ def batch_mae_ignore_zeros(y_true, y_pred, false_positives_penalty_factor=0.1):
     # out: 10
     #
 
-    # Find indices where y_true is not zero
-    non_zero_indices = tf.where(tf.not_equal(y_true, 0))
+    def __init__(self, false_positives_penalty_factor, name='mae_ignore_zeros',
+                 reduction=tf.keras.losses.Reduction.AUTO, ):
+        super(mae_ignore_zeros, self).__init__()
+        self.false_positives_penalty_factor = false_positives_penalty_factor
+        self.name = name
 
-    # Gather the non-zero elements from y_true and y_pred using the indices
-    y_true_non_zero = tf.gather_nd(y_true, non_zero_indices)
-    y_pred_non_zero = tf.gather_nd(y_pred, non_zero_indices)
+    def call(self, y_true, y_pred):
 
-    y_true_non_zero = tf.cast(y_true_non_zero, tf.float64)
-    y_pred_non_zero = tf.cast(y_pred_non_zero, tf.float64)
+        # Find indices where y_true is not zero
+        non_zero_indices = tf.where(tf.not_equal(y_true, 0))
 
-    # Calculate MAE on the non-zero elements
-    mae_non_zero = tf.reduce_mean(tf.abs(y_pred_non_zero - y_true_non_zero))
+        # Gather the non-zero elements from y_true and y_pred using the indices
+        y_true_non_zero = tf.gather_nd(y_true, non_zero_indices)
+        y_pred_non_zero = tf.gather_nd(y_pred, non_zero_indices)
 
-    # Find indices where y_true is zero
-    zero_indices = tf.where(tf.equal(y_true, 0))
+        y_true_non_zero = tf.cast(y_true_non_zero, tf.float64)
+        y_pred_non_zero = tf.cast(y_pred_non_zero, tf.float64)
 
-    # Gather the corresponding y_pred values
-    y_pred_zero = tf.gather_nd(y_pred, zero_indices)
+        # Calculate MAE on the non-zero elements
+        mae_non_zero = tf.reduce_mean(tf.abs(y_pred_non_zero - y_true_non_zero))
 
-    y_pred_zero = tf.cast(y_pred_zero, tf.float64)
+        # Find indices where y_true is zero
+        zero_indices = tf.where(tf.equal(y_true, 0))
 
-    # Calculate the average of false positives
-    false_positives_avg = tf.reduce_mean(y_pred_zero)
+        # Gather the corresponding y_pred values
+        y_pred_zero = tf.gather_nd(y_pred, zero_indices)
 
-    # Combine the MAE on non-zero elements with the average of false positives
-    mae_ignore_zeros = (mae_non_zero + (false_positives_avg * false_positives_penalty_factor)) * 100
+        y_pred_zero = tf.cast(y_pred_zero, tf.float64)
 
-    return mae_ignore_zeros
+        # Calculate the average of false positives
+        false_positives_avg = tf.reduce_mean(y_pred_zero)
 
+        # Combine the MAE on non-zero elements with the average of false positives
+        mae_ignore_zeros = (mae_non_zero + (false_positives_avg * self.false_positives_penalty_factor)) * 100
+
+        return mae_ignore_zeros
 
 def calculate_percentage_errors(y_pred_df, y_test_df):
     # Description: calculate percentage errors on on all taxa
@@ -249,12 +262,129 @@ def sequence_comparisson_graphs(true_sequence, pred_sequence, target_taxa):
     sns.lineplot(data=pred_sequence, label='Predicted Sequence', color=pred_colour)
 
     plt.title(f"True and Predicted sequences for taxa_idx {target_taxa}")
-    plt.xlabel('X-axis Label')  # Add your x-axis label here
-    plt.ylabel('Y-axis Label')  # Add your y-axis label here
 
     plt.legend()
-
     plt.show()
+
+
+def compile_model(model, loss):
+    model.compile(optimizer="Adam", loss=loss, metrics=["mae", "mape"])
+    return model
+
+
+class ensemble():
+
+    # Creates an ensemble of models where one every model intakes all the features but only estimates counts for one taxa
+
+    def __init__(self, ensemble_name, loss, overwrite_on_train=False):
+
+        self.models_out_dir = f"{root_dir}/models/{ensemble_name}"
+        self.overwrite_on_train = overwrite_on_train
+        self.loss = loss
+
+    def train(self, X_sequences_train, y_targets_train, n_epochs):
+
+        if not os.path.exists(self.models_out_dir):
+            os.mkdir(self.models_out_dir)
+        else:
+            if self.overwrite_on_train is False:
+                raise Exception("This model dir already exists")
+            else:
+                print("Overwriting an existing model dir")
+                shutil.rmtree(self.models_out_dir)
+                os.mkdir(self.models_out_dir)
+
+        for taxa_idx in tqdm(y_targets_train.columns, desc="Training models"):
+            model = fetch_model()
+            model = compile_model(model, self.loss)
+            y_targets = y_targets_train[taxa_idx]
+            model.fit(x=X_sequences_train, y=y_targets, validation_split=0.05, epochs=n_epochs, verbose=0)
+
+            model.save(f"{self.models_out_dir}/{taxa_idx}.model")
+
+            del model
+
+    def load(self):
+
+        self.model_dic = {}
+
+        for model_dir in tqdm(os.listdir(self.models_out_dir), desc="Loading the models"):
+            taxa_idx = int(model_dir.replace(".model", ""))
+
+            if isinstance(self.loss, mae_ignore_zeros):
+                model = tf.keras.models.load_model(f"{self.models_out_dir}/{taxa_idx}.model", compile=False)
+                model = compile_model(model, self.loss)
+            else:
+                model = tf.keras.models.load_model(f"{self.models_out_dir}/{taxa_idx}.model")
+
+            self.model_dic[taxa_idx] = model
+
+    def predict(self, X_sequences):
+
+        self.load()
+
+        n_sequences = len(X_sequences)
+
+        pred_list = []
+        for taxa_idx in tqdm(self.model_dic.keys(), desc="Predicting values"):
+            model = self.model_dic[taxa_idx]
+            pred_list.append(model.predict(X_sequences, verbose=0).reshape(n_sequences, ))
+            del (model)
+
+        pred_df = pd.DataFrame(pred_list).T
+
+        return pred_df
+
+
+def create_flat_sequences(df, seq_length):
+    # Solves the problem of representing sequences of taxa counts in 2d space
+    # Using seq_length previous values for each column predict the next one
+
+    # Example:
+
+    # seq_length = 3
+
+    # input data:
+    #     one  two  three
+    # 0    0   10     20
+    # 1    1   11     21
+    # 2    2   12     22
+    # 3    3   13     23
+    # 4    4   14     24
+    # 5    5   15     25
+    # 6    6   16     26
+    # 7    7   17     27
+    # 8    8   18     28
+    # 9    9   19     29
+    #
+    # feats_df.iloc[0]:
+    # 0  1  2   3   4   5   6   7   8
+    # 0  1  2  10  11  12  20  21  22
+    #
+    # targets_df.iloc[0]:
+    # one  two  three
+    #  3   13     23
+
+    df = df.reset_index(drop=True)
+
+    feats_list = []
+    targets = []
+    for top_sample_idx in df.index[seq_length - 1: len(df) - 1]:
+        feats_row = []
+        for taxa_idx in df.columns:
+            taxa_sequence = df.loc[top_sample_idx - seq_length + 1: top_sample_idx, taxa_idx]
+            feats_row.append(taxa_sequence)
+
+        target = df.loc[top_sample_idx + 1]
+        targets.append(target)
+
+        feats_row = pd.concat(feats_row, ignore_index=True)
+        feats_list.append(feats_row)
+
+    feats_df = pd.concat(feats_list, axis=1).T
+    targets_df = pd.concat(targets, axis=1).T
+
+    return feats_df, targets_df
 
 
 
