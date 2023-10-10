@@ -100,7 +100,7 @@ def cut_to_sequences(feats_df, seq_length):
     # Description: cuts the dataframe into X_sequences of shape (seq_length, n_features) and y_targets
 
     # Example:
-    # Our example features are
+    # Our example data
     #    one  two  three
     # 0    1   11     21
     # 1    2   12     22
