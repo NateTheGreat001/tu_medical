@@ -11,52 +11,91 @@ from tqdm import tqdm
 
 # hardcoded stuff
 root_dir = "/home/nate/tu_medical"
+
 df_path = "data/otu_table_example.csv"
+metadata_path = "data/metadata_example.csv"
 
 
-def forward_rolling_average(values, window_size):
-    # Description: applies a forward rolling average function e.g.:
-    #   sequence = pd.Series([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
-    #   forward_rolling_average(values=sequence, window_size=3).tolist()
-    #   out [1, 2, 3, 4, 5, 6, 7, 8]
+#def forward_rolling_average(values, window_size):
+#    # Description: applies a forward rolling average function e.g.:
+#    #   sequence = pd.Series([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+#    #   forward_rolling_average(values=sequence, window_size=3).tolist()
+#    #   out [1, 2, 3, 4, 5, 6, 7, 8]
+#
+#    values = pd.Series(values)
+#    original_idxs = values.index
+#
+#    series = values.reset_index(drop=True)
+#
+#    for idx in range(len(series) - window_size):
+#        next_vals = series[idx:idx + window_size]
+#
+#        # print(idx, next_vals.tolist())
+#        # print(next_vals.mean())
+#
+#        series[idx] = next_vals.mean()
+#
+#    series.index = original_idxs
+#
+#    series = series.iloc[:-window_size]
+#
+#    return series
 
-    values = pd.Series(values)
-    original_idxs = values.index
 
-    series = values.reset_index(drop=True)
-
-    for idx in range(len(series) - window_size):
-        next_vals = series[idx:idx + window_size]
-
-        # print(idx, next_vals.tolist())
-        # print(next_vals.mean())
-
-        series[idx] = next_vals.mean()
-
-    series.index = original_idxs
-
-    series = series.iloc[:-window_size]
-
-    return series
+#def smooth_it_out(df, window_size=5, n_jobs=16):
+#    # Description: applies forward_rolling_average to every column in df in parallel
+#
+#    smooth_cols = Parallel(n_jobs=n_jobs)(delayed(forward_rolling_average)(df[col], window_size) for col in df.columns)
+#
+#    for idx, col in enumerate(df.columns):
+#        df[col] = smooth_cols[idx]
+#
+#    df = df.iloc[:-window_size]
+#
+#    return df
 
 
-def smooth_it_out(df, window_size=5, n_jobs=16):
-    # Description: applies forward_rolling_average to every column in df in parallel
+def load_and_merge():
+    df = pd.read_csv(df_path, index_col="Unnamed: 0").T
+    meta_df = pd.read_csv(metadata_path, index_col="sample_id")
 
-    smooth_cols = Parallel(n_jobs=n_jobs)(delayed(forward_rolling_average)(df[col], window_size) for col in df.columns)
-
-    for idx, col in enumerate(df.columns):
-        df[col] = smooth_cols[idx]
-
-    df = df.iloc[:-window_size]
+    df["subject_id"] = [idx.split(".")[0] for idx in df.index]
+    df["sampling_day"] = meta_df.loc[df.index]["Sampling_day"].astype(int)
+    df["ind_time"] = meta_df.loc[df.index]["ind_time"].astype(float)
 
     return df
 
 
+def remove_underpopulated_taxa(df, max_zeros_pct):
+    # get rid of features that are way too sparse
+    zero_counts = pd.Series([sum(df[col] == 0) for col in df.columns], index=df.columns)
+    zero_pcts = zero_counts / len(df)
+    populated_feats = zero_pcts[zero_pcts < max_zeros_pct].index
+    df = df[populated_feats]
+
+    return df
+
+
+def standard_rolling_average(df, window_size):
+    # hardcoded stuff
+    ignore_cols = ["subject_id", "sampling_day", "ind_time"]
+
+    for column in df.columns:
+        if column in ignore_cols: continue
+        df[column] = df[column].rolling(window=window_size).mean()
+
+    df = df.dropna()  # Drop NaN values introduced by the rolling operation
+    return df
+
+
 def feature_wise_scaling(df):
+    ignore_cols = "subject_id"
     # Description: scales every column to between 0 and 1
 
     for col in df.columns:
+        if str(col) in ignore_cols:
+            continue
+
         _min_ = df[col].min()
         _max_ = df[col].max()
 
@@ -65,26 +104,26 @@ def feature_wise_scaling(df):
     return df
 
 
-def preprocess(zero_values_percentage_cutoff, smoothing_window_size):
-
-    # Description: reads the data; removes underpopulated taxa; smoothes and scales
-
-    # load the data
-    df = pd.read_csv(df_path, index_col="Unnamed: 0").T
-
-    # get rid of features that are way too sparse
-    zero_counts = pd.Series([sum(df[col] == 0) for col in df.columns], index=df.columns)
-    zero_pcts = zero_counts / len(df)
-    populated_feats = zero_pcts[zero_pcts < zero_values_percentage_cutoff].index
-    df = df[populated_feats]
-
-    # smooth the data my forward-rolling averaging
-    df = smooth_it_out(df=df, window_size=smoothing_window_size)
-
-    # scale the data
-    df = feature_wise_scaling(df)
-
-    return df
+#def preprocess(zero_values_percentage_cutoff, smoothing_window_size):
+#
+#    # Description: reads the data; removes underpopulated taxa; smoothes and scales
+#
+#    # load the data
+#    df = pd.read_csv(df_path, index_col="Unnamed: 0").T
+#
+#    # get rid of features that are way too sparse
+#    zero_counts = pd.Series([sum(df[col] == 0) for col in df.columns], index=df.columns)
+#    zero_pcts = zero_counts / len(df)
+#    populated_feats = zero_pcts[zero_pcts < zero_values_percentage_cutoff].index
+#    df = df[populated_feats]
+#
+#    # smooth the data my forward-rolling averaging
+#    df = smooth_it_out(df=df, window_size=smoothing_window_size)
+#
+#    # scale the data
+#    df = feature_wise_scaling(df)
+#
+#    return df
 
 
 def plot_a_taxa_sequence(sequence, color, title, figsize=(10,5)):
@@ -135,6 +174,27 @@ def cut_to_sequences(feats_df, seq_length):
     X_sequences = X_sequences.reshape(-1, seq_length, num_features)
 
     return X_sequences, y_targets
+
+
+def feats_and_targets(df, seq_length):
+    feats = []
+    targets = []
+
+    subjects = df.subject_id.unique()
+    df_subject_grp = df.groupby("subject_id")
+
+    for subject_id in subjects:
+        subject_df = df_subject_grp.get_group(subject_id).drop(columns=["subject_id"])
+        subject_feats, subject_targets = cut_to_sequences(subject_df, seq_length=seq_length)
+
+        for sequence_idx in range(len(subject_feats)):
+            feats.append(subject_feats[sequence_idx])
+            targets.append(subject_targets[sequence_idx])
+
+    feats = np.asarray(feats)
+    targets = np.asarray(targets)
+
+    return feats, targets
 
 
 class mae_ignore_zeros(tf.keras.losses.Loss):
@@ -195,12 +255,16 @@ class mae_ignore_zeros(tf.keras.losses.Loss):
 def calculate_percentage_errors(y_pred_df, y_test_df):
     # Description: calculate percentage errors on on all taxa
 
+    # hardcoded stuff
+    ignore_cols = ["subject_id", "sampling_day", "ind_time"]
+
     y_pred_df = y_pred_df.reset_index(drop=True)
     y_test_df = y_test_df.reset_index(drop=True)
 
     errors_df = []
     for col in y_pred_df.columns:
-        errors = abs((y_pred_df[col] - y_test_df[col]) / (y_pred_df[col] + 1e-10))
+        if col in ignore_cols: continue
+        errors = abs((y_test_df[col] - y_pred_df[col]) / (y_test_df[col] + 1e-10))
         errors_df.append(errors)
 
     errors_df = pd.concat(errors_df, axis=1)
@@ -247,12 +311,14 @@ def sequence_comparisson_graphs(true_sequence, pred_sequence, target_taxa):
     plt.figure(figsize=figsize)
     sns.lineplot(true_sequence, color=true_colour)
     plt.title(f"True sequence for taxa_idx {target_taxa}")
+    plt.xticks([])
     plt.show()
 
     sns.set()
     plt.figure(figsize=figsize)
     sns.lineplot(pred_sequence, color=pred_colour)
     plt.title(f"Pred sequence for taxa_idx {target_taxa}")
+    plt.xticks([])
     plt.show()
 
     sns.set()
@@ -264,7 +330,9 @@ def sequence_comparisson_graphs(true_sequence, pred_sequence, target_taxa):
     plt.title(f"True and Predicted sequences for taxa_idx {target_taxa}")
 
     plt.legend()
+    plt.xticks([])
     plt.show()
+
 
 
 def compile_model(model, loss):
