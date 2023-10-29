@@ -138,6 +138,8 @@ def plot_a_taxa_sequence(sequence, color, title, figsize=(10,5)):
 def cut_to_sequences(feats_df, seq_length):
     # Description: cuts the dataframe into X_sequences of shape (seq_length, n_features) and y_targets
 
+    ignore_cols = ["subject_id", "sampling_day", "ind_time"]
+
     # Example:
     # Our example data
     #    one  two  three
@@ -162,39 +164,54 @@ def cut_to_sequences(feats_df, seq_length):
     num_features = len(feats_df.columns)
 
     X_sequences = []
-    y_targets = []
+    y_targets = pd.Series(dtype=float)
 
     for i in range(len(feats_df) - seq_length):
+        target_idx = feats_df.iloc[i + seq_length].name
+        
         X_sequences.append(feats_df.iloc[i:i + seq_length])
-        y_targets.append(feats_df.iloc[i + seq_length])
+        y_targets[target_idx] = feats_df.loc[target_idx].drop(columns=ignore_cols)
 
-    X_sequences = np.array(X_sequences)
-    y_targets = np.array(y_targets)
-
-    X_sequences = X_sequences.reshape(-1, seq_length, num_features)
-
+    X_sequences = np.asarray(X_sequences)
+    
     return X_sequences, y_targets
 
 
-def feats_and_targets(df, seq_length):
-    feats = []
-    targets = []
-
+def feats_and_targets(df, seq_length, n_test_seq):
     subjects = df.subject_id.unique()
     df_subject_grp = df.groupby("subject_id")
+
+    test_subjects_idx = np.random.choice(len(subjects), size=n_test_seq, replace=False)
+    test_subjects = subjects[test_subjects_idx]
+
+    print(f"The test subjects are {test_subjects}")
+
+    train_feats = []
+    train_targets = []
+
+    test_feats = {test_subject: [] for test_subject in test_subjects}
+    test_targets = {test_subject: [] for test_subject in test_subjects}
 
     for subject_id in subjects:
         subject_df = df_subject_grp.get_group(subject_id).drop(columns=["subject_id"])
         subject_feats, subject_targets = cut_to_sequences(subject_df, seq_length=seq_length)
 
         for sequence_idx in range(len(subject_feats)):
-            feats.append(subject_feats[sequence_idx])
-            targets.append(subject_targets[sequence_idx])
 
-    feats = np.asarray(feats)
-    targets = np.asarray(targets)
+            if subject_id in test_subjects:
+                test_feats[subject_id].append(subject_feats[sequence_idx])
+                test_targets[subject_id].append(subject_targets[sequence_idx])
+            else:
+                train_feats.append(subject_feats[sequence_idx])
+                train_targets.append(subject_targets[sequence_idx])
 
-    return feats, targets
+                # shuffle the train features and targets
+    random_order = np.random.permutation(len(train_feats))
+
+    train_feats = np.asarray(train_feats)[random_order]
+    train_targets = np.asarray(train_targets)[random_order]
+
+    return train_feats, train_targets, test_feats, test_targets, test_subjects
 
 
 class mae_ignore_zeros(tf.keras.losses.Loss):
@@ -408,6 +425,9 @@ def create_flat_sequences(df, seq_length):
     # Solves the problem of representing sequences of taxa counts in 2d space
     # Using seq_length previous values for each column predict the next one
 
+    # hardcoded suff
+    ignore_cols = ["subject_id", "sampling_day", "ind_time"]
+
     # Example:
 
     # seq_length = 3
@@ -452,7 +472,13 @@ def create_flat_sequences(df, seq_length):
     feats_df = pd.concat(feats_list, axis=1).T
     targets_df = pd.concat(targets, axis=1).T
 
+    for col in ignore_cols:
+        if col in targets_df.columns: targets_df = targets_df.drop(columns=[col])
+
     return feats_df, targets_df
+
+
+
 
 
 
