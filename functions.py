@@ -14,6 +14,7 @@ root_dir = "/home/nate/tu_medical"
 
 df_path = "data/otu_table_example.csv"
 metadata_path = "data/metadata_example.csv"
+ignore_cols = ["subject_id", "sampling_day", "ind_time"]
 
 
 #def forward_rolling_average(values, window_size):
@@ -66,19 +67,24 @@ def load_and_merge():
     return df
 
 
-def remove_underpopulated_taxa(df, max_zeros_pct):
-    # get rid of features that are way too sparse
-    zero_counts = pd.Series([sum(df[col] == 0) for col in df.columns], index=df.columns)
-    zero_pcts = zero_counts / len(df)
-    populated_feats = zero_pcts[zero_pcts < max_zeros_pct].index
+def calculate_non_zero_value_percentages(df):
+
+    non_zero_counts = pd.Series([sum(df[col] != 0) for col in df.columns], index=df.columns)
+    non_zero_pcts = non_zero_counts / len(df)
+
+    return non_zero_pcts
+
+
+def remove_underpopulated_taxa(df, min_non_zero_pcts):
+    # get rid of features that are populated way too sparsely
+    non_zero_pcts = calculate_non_zero_value_percentages(df)
+    populated_feats = non_zero_pcts[non_zero_pcts > min_non_zero_pcts].index
     df = df[populated_feats]
 
     return df
 
 
 def standard_rolling_average(df, window_size):
-    # hardcoded stuff
-    ignore_cols = ["subject_id", "sampling_day", "ind_time"]
 
     for column in df.columns:
         if column in ignore_cols: continue
@@ -89,7 +95,6 @@ def standard_rolling_average(df, window_size):
 
 
 def feature_wise_scaling(df):
-    ignore_cols = "subject_id"
     # Description: scales every column to between 0 and 1
 
     for col in df.columns:
@@ -137,8 +142,6 @@ def plot_a_taxa_sequence(sequence, color, title, figsize=(10,5)):
 
 def cut_to_sequences(feats_df, seq_length):
     # Description: cuts the dataframe into X_sequences of shape (seq_length, n_features) and y_targets
-
-    ignore_cols = ["subject_id", "sampling_day", "ind_time"]
 
     # Example:
     # Our example data
@@ -272,9 +275,6 @@ class mae_ignore_zeros(tf.keras.losses.Loss):
 def calculate_percentage_errors(y_pred_df, y_test_df):
     # Description: calculate percentage errors on on all taxa
 
-    # hardcoded stuff
-    ignore_cols = ["subject_id", "sampling_day", "ind_time"]
-
     y_pred_df = y_pred_df.reset_index(drop=True)
     y_test_df = y_test_df.reset_index(drop=True)
 
@@ -292,7 +292,6 @@ def calculate_percentage_errors(y_pred_df, y_test_df):
 def percentile_graph(errors_df, label, y_top_lim=3, step=0.1):
     # Description: Solves the problem of representing accuracy on a lot of different taxa in one single graph
     # Produces a graph of percentiles on medians in (y_pred - y_true) on taxa sequences
-
 
     # hardcoded stuff
     percentile_range = np.arange(0, 101)
@@ -425,9 +424,6 @@ def create_flat_sequences(df, seq_length):
     # Solves the problem of representing sequences of taxa counts in 2d space
     # Using seq_length previous values for each column predict the next one
 
-    # hardcoded suff
-    ignore_cols = ["subject_id", "sampling_day", "ind_time"]
-
     # Example:
 
     # seq_length = 3
@@ -476,6 +472,72 @@ def create_flat_sequences(df, seq_length):
         if col in targets_df.columns: targets_df = targets_df.drop(columns=[col])
 
     return feats_df, targets_df
+
+
+def median_errors_by_population_rate(df, only_predicted_errors, only_predicted_taxa):
+    population_rates = calculate_non_zero_value_percentages(df).drop(['subject_id', 'sampling_day'])
+
+    population_rates_only_predicted = population_rates[only_predicted_taxa]
+    populated_taxa_errors = only_predicted_errors.median()[population_rates_only_predicted.index]
+    # clip populated taxa errors for plotting
+    populated_taxa_errors = populated_taxa_errors.clip(0, 10)
+
+    sns.set()
+    plt.figure(figsize=(10, 8))
+
+    sns.regplot(x=population_rates_only_predicted, y=populated_taxa_errors)
+    plt.yticks(range(0, 11))
+    plt.xlabel("Feature population rates")
+    plt.ylabel("Median Error")
+
+    plt.title(f"Median errors by population rates")
+    plt.show()
+
+
+def xgboost_flat_feats_and_targets(df, n_test_seq, seq_length, validation_pct=0.1):
+    subjects = df.subject_id.unique()
+    df_subject_grp = df.groupby("subject_id")
+
+    test_subjects_idx = np.random.choice(len(subjects), size=n_test_seq, replace=False)
+    test_subjects = subjects[test_subjects_idx]
+
+    print(f"The test subjects are {test_subjects}")
+
+    train_feats = []
+    train_targets = []
+    test_feats = {test_subject: [] for test_subject in test_subjects}
+    test_targets = {test_subject: [] for test_subject in test_subjects}
+
+    for subject_id in subjects:
+        subject_df = df_subject_grp.get_group(subject_id).drop(columns=["subject_id"])
+        subject_feats, subject_targets = create_flat_sequences(subject_df, seq_length=seq_length)
+
+        if subject_id in test_subjects:
+            test_feats[subject_id] = subject_feats
+            test_targets[subject_id] = subject_targets
+        else:
+            train_feats.append(subject_feats)
+            train_targets.append(subject_targets)
+
+    train_feats = pd.concat(train_feats).reset_index(drop=True)
+    train_targets = pd.concat(train_targets).reset_index(drop=True)
+
+    # get the validation sets
+    validation_size = int(np.round(validation_pct * len(train_feats)))
+    validation_idxs = list(np.random.choice(range(len(train_feats)), size=validation_size, replace=False))
+
+    val_feats = train_feats.loc[validation_idxs]
+    val_targets = train_targets.loc[validation_idxs]
+
+    train_feats = train_feats.drop(validation_idxs).reset_index(drop=True)
+    train_targets = train_targets.drop(validation_idxs).reset_index(drop=True)
+
+    random_order = np.random.permutation(len(train_feats))
+
+    train_feats = train_feats.loc[random_order].reset_index(drop=True)
+    train_targets = train_targets.loc[random_order].reset_index(drop=True)
+
+    return train_feats, train_targets, val_feats, val_targets, test_feats, test_targets, test_subjects
 
 
 
