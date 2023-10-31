@@ -14,7 +14,7 @@ root_dir = "/home/nate/tu_medical"
 
 df_path = "data/otu_table_example.csv"
 metadata_path = "data/metadata_example.csv"
-ignore_cols = ["subject_id", "sampling_day", "ind_time"]
+metadata_cols = ["subject_id", "sampling_day", "sampling_gap", "ind_time"]
 
 
 #def forward_rolling_average(values, window_size):
@@ -57,6 +57,9 @@ ignore_cols = ["subject_id", "sampling_day", "ind_time"]
 
 
 def load_and_merge():
+
+    # Description: loads the main dateset and the metadata datasets, merges their contents
+
     df = pd.read_csv(df_path, index_col="Unnamed: 0").T
     meta_df = pd.read_csv(metadata_path, index_col="sample_id")
 
@@ -69,14 +72,18 @@ def load_and_merge():
 
 def calculate_non_zero_value_percentages(df):
 
-    non_zero_counts = pd.Series([sum(df[col] != 0) for col in df.columns], index=df.columns)
-    non_zero_pcts = non_zero_counts / len(df)
+    # Description: for each taxa calculate how much percentage of the total entries are not zeros
 
-    return non_zero_pcts
+    non_zero_counts = pd.Series([sum(df[col] != 0) for col in df.columns], index=df.columns)
+    population_rates = non_zero_counts / len(df)
+
+    return population_rates
 
 
 def remove_underpopulated_taxa(df, min_non_zero_pcts):
-    # get rid of features that are populated way too sparsely
+
+    # get rid of the taxa that are populated too sparsely
+
     non_zero_pcts = calculate_non_zero_value_percentages(df)
     populated_feats = non_zero_pcts[non_zero_pcts > min_non_zero_pcts].index
     df = df[populated_feats]
@@ -86,8 +93,10 @@ def remove_underpopulated_taxa(df, min_non_zero_pcts):
 
 def standard_rolling_average(df, window_size):
 
+    # For each taxa apply a rolling average function. Ignores the non-taxa column e.g. sampling_day
+
     for column in df.columns:
-        if column in ignore_cols: continue
+        if column in metadata_cols: continue
         df[column] = df[column].rolling(window=window_size).mean()
 
     df = df.dropna()  # Drop NaN values introduced by the rolling operation
@@ -98,7 +107,7 @@ def feature_wise_scaling(df):
     # Description: scales every column to between 0 and 1
 
     for col in df.columns:
-        if str(col) in ignore_cols:
+        if str(col) in ["subject_id"]:
             continue
 
         _min_ = df[col].min()
@@ -140,8 +149,10 @@ def plot_a_taxa_sequence(sequence, color, title, figsize=(10,5)):
     plt.show()
 
 
-def cut_to_sequences(feats_df, seq_length):
+def cut_to_sequences(feats_df, seq_length, mode):
     # Description: cuts the dataframe into X_sequences of shape (seq_length, n_features) and y_targets
+    # if mode is test then metadata cols are kept in the targets for evaluation
+    # elif mode is test then matadata cols are not kept in targets because they are not predicted
 
     # Example:
     # Our example data
@@ -166,24 +177,51 @@ def cut_to_sequences(feats_df, seq_length):
 
     num_features = len(feats_df.columns)
 
+    # get the column names for the subject_id encodings
+    subject_id_dummies = feats_df.columns[pd.Series(feats_df.columns).apply(lambda x: str(x).startswith("subject_id"))]
+
     X_sequences = []
     y_targets = pd.Series(dtype=float)
 
     for i in range(len(feats_df) - seq_length):
         target_idx = feats_df.iloc[i + seq_length].name
-        
-        X_sequences.append(feats_df.iloc[i:i + seq_length])
-        y_targets[target_idx] = feats_df.loc[target_idx].drop(columns=ignore_cols)
+
+        feats = feats_df.iloc[i:i + seq_length].drop(columns=["subject_id"])
+
+        targets = feats_df.loc[target_idx]
+        targets = targets[~targets.index.isin(subject_id_dummies)]  # remove subject_id encodings from targets
+
+        if mode == "train":
+            targets = targets[~targets.index.isin(metadata_cols)]
+
+        X_sequences.append(feats)
+        y_targets[target_idx] = targets
 
     X_sequences = np.asarray(X_sequences)
-    
+
     return X_sequences, y_targets
 
 
 def feats_and_targets(df, seq_length, n_test_seq):
+
+    # Description: Prepares the features. For each test subject applies cut_to_sequences to get X_sequences and y_targets
+    # Each test sequence is a set of all taxa observations for one subject
+
     subjects = df.subject_id.unique()
+
+    # encode subject id
+    subject_ids = df["subject_id"]  # to preserve the original column through one hot encoding
+    df = pd.get_dummies(df, columns=['subject_id'], prefix='subject_id')  # encode subject_id using one hot encoding
+    df["subject_id"] = subject_ids
+
+    # create the sampling_gap_feature
+    df['sampling_gap'] = df['sampling_day'].diff()
+    df = df.fillna(0)
+    df = df.drop(columns=["sampling_day"])
+
     df_subject_grp = df.groupby("subject_id")
 
+    # select the test subjects
     test_subjects_idx = np.random.choice(len(subjects), size=n_test_seq, replace=False)
     test_subjects = subjects[test_subjects_idx]
 
@@ -196,8 +234,10 @@ def feats_and_targets(df, seq_length, n_test_seq):
     test_targets = {test_subject: [] for test_subject in test_subjects}
 
     for subject_id in subjects:
-        subject_df = df_subject_grp.get_group(subject_id).drop(columns=["subject_id"])
-        subject_feats, subject_targets = cut_to_sequences(subject_df, seq_length=seq_length)
+        subject_df = df_subject_grp.get_group(subject_id)
+
+        feats_mode = "test" if subject_id in test_subjects else "train"
+        subject_feats, subject_targets = cut_to_sequences(subject_df, seq_length=seq_length, mode=feats_mode)
 
         for sequence_idx in range(len(subject_feats)):
 
@@ -208,11 +248,11 @@ def feats_and_targets(df, seq_length, n_test_seq):
                 train_feats.append(subject_feats[sequence_idx])
                 train_targets.append(subject_targets[sequence_idx])
 
-                # shuffle the train features and targets
+    # shuffle the train features and targets
     random_order = np.random.permutation(len(train_feats))
 
-    train_feats = np.asarray(train_feats)[random_order]
-    train_targets = np.asarray(train_targets)[random_order]
+    train_feats = np.asarray(train_feats)[random_order].astype("float32")
+    train_targets = np.asarray(train_targets)[random_order].astype("float32")
 
     return train_feats, train_targets, test_feats, test_targets, test_subjects
 
@@ -280,7 +320,7 @@ def calculate_percentage_errors(y_pred_df, y_test_df):
 
     errors_df = []
     for col in y_pred_df.columns:
-        if col in ignore_cols: continue
+        if col in metadata_cols: continue
         errors = abs((y_test_df[col] - y_pred_df[col]) / (y_test_df[col] + 1e-10))
         errors_df.append(errors)
 
@@ -468,13 +508,16 @@ def create_flat_sequences(df, seq_length):
     feats_df = pd.concat(feats_list, axis=1).T
     targets_df = pd.concat(targets, axis=1).T
 
-    for col in ignore_cols:
+    for col in metadata_cols:
         if col in targets_df.columns: targets_df = targets_df.drop(columns=[col])
 
     return feats_df, targets_df
 
 
 def median_errors_by_population_rate(df, only_predicted_errors, only_predicted_taxa):
+
+    # Description: creates a scatterplot where median errors in taxa are compared to their population rates
+
     population_rates = calculate_non_zero_value_percentages(df).drop(['subject_id', 'sampling_day'])
 
     population_rates_only_predicted = population_rates[only_predicted_taxa]
@@ -495,6 +538,10 @@ def median_errors_by_population_rate(df, only_predicted_errors, only_predicted_t
 
 
 def xgboost_flat_feats_and_targets(df, n_test_seq, seq_length, validation_pct=0.1):
+
+    # Follows the same logic as feats_and_targets, but with two major differences: the first is it applies create_flat_sequences because XGBoost expects flat output
+    # secondly it outputs also a validation set as it is required to properly train an XGBoost model
+
     subjects = df.subject_id.unique()
     df_subject_grp = df.groupby("subject_id")
 
