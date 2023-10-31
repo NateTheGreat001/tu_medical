@@ -312,6 +312,7 @@ class mae_ignore_zeros(tf.keras.losses.Loss):
 
         return mae_ignore_zeros
 
+
 def calculate_percentage_errors(y_pred_df, y_test_df):
     # Description: calculate percentage errors on on all taxa
 
@@ -489,6 +490,9 @@ def create_flat_sequences(df, seq_length):
     # one  two  three
     #  3   13     23
 
+    # get the column names for the subject_id encodings
+    subject_id_dummies = df.columns[pd.Series(df.columns).apply(lambda x: str(x).startswith("subject_id"))]
+
     df = df.reset_index(drop=True)
 
     feats_list = []
@@ -499,7 +503,7 @@ def create_flat_sequences(df, seq_length):
             taxa_sequence = df.loc[top_sample_idx - seq_length + 1: top_sample_idx, taxa_idx]
             feats_row.append(taxa_sequence)
 
-        target = df.loc[top_sample_idx + 1]
+        target = df[df.columns[(~df.columns.isin(subject_id_dummies) & (~df.columns.isin(metadata_cols)))]].loc[top_sample_idx + 1]
         targets.append(target)
 
         feats_row = pd.concat(feats_row, ignore_index=True)
@@ -508,39 +512,23 @@ def create_flat_sequences(df, seq_length):
     feats_df = pd.concat(feats_list, axis=1).T
     targets_df = pd.concat(targets, axis=1).T
 
-    for col in metadata_cols:
-        if col in targets_df.columns: targets_df = targets_df.drop(columns=[col])
-
     return feats_df, targets_df
-
-
-def median_errors_by_population_rate(df, only_predicted_errors, only_predicted_taxa):
-
-    # Description: creates a scatterplot where median errors in taxa are compared to their population rates
-
-    population_rates = calculate_non_zero_value_percentages(df).drop(['subject_id', 'sampling_day'])
-
-    population_rates_only_predicted = population_rates[only_predicted_taxa]
-    populated_taxa_errors = only_predicted_errors.median()[population_rates_only_predicted.index]
-    # clip populated taxa errors for plotting
-    populated_taxa_errors = populated_taxa_errors.clip(0, 10)
-
-    sns.set()
-    plt.figure(figsize=(10, 8))
-
-    sns.regplot(x=population_rates_only_predicted, y=populated_taxa_errors)
-    plt.yticks(range(0, 11))
-    plt.xlabel("Feature population rates")
-    plt.ylabel("Median Error")
-
-    plt.title(f"Median errors by population rates")
-    plt.show()
 
 
 def xgboost_flat_feats_and_targets(df, n_test_seq, seq_length, validation_pct=0.1):
 
     # Follows the same logic as feats_and_targets, but with two major differences: the first is it applies create_flat_sequences because XGBoost expects flat output
     # secondly it outputs also a validation set as it is required to properly train an XGBoost model
+
+    # encode subject id
+    subject_ids = df["subject_id"]  # to preserve the original column through one hot encoding
+    df = pd.get_dummies(df, columns=['subject_id'], prefix='subject_id')  # encode subject_id using one hot encoding
+    df["subject_id"] = subject_ids
+
+    # create the sampling_gap_feature
+    df['sampling_gap'] = df['sampling_day'].diff()
+    df = df.fillna(0)
+    df = df.drop(columns=["sampling_day"])
 
     subjects = df.subject_id.unique()
     df_subject_grp = df.groupby("subject_id")
@@ -587,7 +575,27 @@ def xgboost_flat_feats_and_targets(df, n_test_seq, seq_length, validation_pct=0.
     return train_feats, train_targets, val_feats, val_targets, test_feats, test_targets, test_subjects
 
 
+def median_errors_by_population_rate(df, only_predicted_errors, only_predicted_taxa):
 
+    # Description: creates a scatterplot where median errors in taxa are compared to their population rates
+
+    population_rates = calculate_non_zero_value_percentages(df).drop(['subject_id', 'sampling_day'])
+
+    population_rates_only_predicted = population_rates[only_predicted_taxa]
+    populated_taxa_errors = only_predicted_errors.median()[population_rates_only_predicted.index]
+    # clip populated taxa errors for plotting
+    populated_taxa_errors = populated_taxa_errors.clip(0, 10)
+
+    sns.set()
+    plt.figure(figsize=(10, 8))
+
+    sns.regplot(x=population_rates_only_predicted, y=populated_taxa_errors)
+    plt.yticks(range(0, 11))
+    plt.xlabel("Feature population rates")
+    plt.ylabel("Median Error")
+
+    plt.title(f"Median errors by population rates")
+    plt.show()
 
 
 
