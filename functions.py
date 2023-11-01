@@ -70,23 +70,22 @@ def load_and_merge():
     return df
 
 
-def calculate_non_zero_value_percentages(df):
+def calculate_population_rates(df):
 
     # Description: for each taxa calculate how much percentage of the total entries are not zeros
 
-    non_zero_counts = pd.Series([sum(df[col] != 0) for col in df.columns], index=df.columns)
-    population_rates = non_zero_counts / len(df)
+    population_rates = pd.Series([sum(df[col] != 0) / len(df[col]) for col in df.columns], index=df.columns)
 
     return population_rates
 
 
-def remove_underpopulated_taxa(df, min_non_zero_pcts):
-
+def remove_underpopulated_taxa(df, min_population_rate):
     # get rid of the taxa that are populated too sparsely
 
-    non_zero_pcts = calculate_non_zero_value_percentages(df)
-    populated_feats = non_zero_pcts[non_zero_pcts > min_non_zero_pcts].index
-    df = df[populated_feats]
+    population_rates = calculate_population_rates(df)
+    selected_columns = population_rates[population_rates >= min_population_rate].index
+
+    df = df[selected_columns]
 
     return df
 
@@ -397,70 +396,6 @@ def compile_model(model, loss):
     return model
 
 
-class ensemble():
-
-    # Creates an ensemble of models where one every model intakes all the features but only estimates counts for one taxa
-
-    def __init__(self, ensemble_name, loss, overwrite_on_train=False):
-
-        self.models_out_dir = f"{root_dir}/models/{ensemble_name}"
-        self.overwrite_on_train = overwrite_on_train
-        self.loss = loss
-
-    def train(self, X_sequences_train, y_targets_train, n_epochs):
-
-        if not os.path.exists(self.models_out_dir):
-            os.mkdir(self.models_out_dir)
-        else:
-            if self.overwrite_on_train is False:
-                raise Exception("This model dir already exists")
-            else:
-                print("Overwriting an existing model dir")
-                shutil.rmtree(self.models_out_dir)
-                os.mkdir(self.models_out_dir)
-
-        for taxa_idx in tqdm(y_targets_train.columns, desc="Training models"):
-            model = fetch_model()
-            model = compile_model(model, self.loss)
-            y_targets = y_targets_train[taxa_idx]
-            model.fit(x=X_sequences_train, y=y_targets, validation_split=0.05, epochs=n_epochs, verbose=0)
-
-            model.save(f"{self.models_out_dir}/{taxa_idx}.model")
-
-            del model
-
-    def load(self):
-
-        self.model_dic = {}
-
-        for model_dir in tqdm(os.listdir(self.models_out_dir), desc="Loading the models"):
-            taxa_idx = int(model_dir.replace(".model", ""))
-
-            if isinstance(self.loss, mae_ignore_zeros):
-                model = tf.keras.models.load_model(f"{self.models_out_dir}/{taxa_idx}.model", compile=False)
-                model = compile_model(model, self.loss)
-            else:
-                model = tf.keras.models.load_model(f"{self.models_out_dir}/{taxa_idx}.model")
-
-            self.model_dic[taxa_idx] = model
-
-    def predict(self, X_sequences):
-
-        self.load()
-
-        n_sequences = len(X_sequences)
-
-        pred_list = []
-        for taxa_idx in tqdm(self.model_dic.keys(), desc="Predicting values"):
-            model = self.model_dic[taxa_idx]
-            pred_list.append(model.predict(X_sequences, verbose=0).reshape(n_sequences, ))
-            del (model)
-
-        pred_df = pd.DataFrame(pred_list).T
-
-        return pred_df
-
-
 def create_flat_sequences(df, seq_length):
     # Solves the problem of representing sequences of taxa counts in 2d space
     # Using seq_length previous values for each column predict the next one
@@ -579,7 +514,7 @@ def median_errors_by_population_rate(df, only_predicted_errors, only_predicted_t
 
     # Description: creates a scatterplot where median errors in taxa are compared to their population rates
 
-    population_rates = calculate_non_zero_value_percentages(df).drop(['subject_id', 'sampling_day'])
+    population_rates = calculate_population_rates(df).drop(['subject_id', 'sampling_day'])
 
     population_rates_only_predicted = population_rates[only_predicted_taxa]
     populated_taxa_errors = only_predicted_errors.median()[population_rates_only_predicted.index]
@@ -595,6 +530,16 @@ def median_errors_by_population_rate(df, only_predicted_errors, only_predicted_t
     plt.ylabel("Median Error")
 
     plt.title(f"Median errors by population rates")
+    plt.show()
+
+
+def median_errors_plot(only_predicted_errors, clip=1):
+
+    plt.figure(figsize=(10,8))
+    plt.hist(only_predicted_errors.median().clip(0, clip))
+    plt.title("Median Errors across successfully predicted taxa")
+    plt.xlabel("Median Error")
+    plt.ylabel("Count")
     plt.show()
 
 
